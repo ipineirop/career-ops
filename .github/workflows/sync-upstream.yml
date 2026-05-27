@@ -1,0 +1,80 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: '17 6 * * *'   # daily at 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/santifer/career-ops.git
+          git fetch upstream main
+
+      - name: Fast-forward merge upstream/main
+        id: sync
+        run: |
+          set -e
+          if git merge --ff-only upstream/main; then
+            echo "result=ok" >> $GITHUB_OUTPUT
+          else
+            echo "result=non-ff" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+      - name: Push to fork main
+        if: steps.sync.outputs.result == 'ok'
+        run: git push origin main
+
+      - name: Open issue on non-fast-forward divergence
+        if: steps.sync.outputs.result == 'non-ff'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `Sync blocked: fork diverged from upstream (${today})`;
+            const body = [
+              'The daily sync-upstream workflow could not fast-forward `main` onto `upstream/main`.',
+              '',
+              'This usually means the fork has commits not present upstream. To resolve:',
+              '1. Inspect divergence: `git fetch upstream && git log --oneline main..upstream/main; git log --oneline upstream/main..main`',
+              '2. Decide: rebase the fork onto upstream (preserves new upstream commits) or merge.',
+              '3. Push the result to `main`.',
+              '',
+              'Until resolved, Labra\'s `vendor/career-ops` submodule will not pick up new upstream changes.',
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'sync-blocked',
+            });
+            if (issues.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['sync-blocked'],
+              });
+            }
