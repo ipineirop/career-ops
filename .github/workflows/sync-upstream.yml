@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  issues: write
 
 jobs:
   sync:
@@ -30,51 +29,41 @@ jobs:
           git remote add upstream https://github.com/santifer/career-ops.git
           git fetch upstream main
 
-      - name: Fast-forward merge upstream/main
+      - name: Rebase fork commits onto upstream/main
         id: sync
         run: |
           set -e
-          if git merge --ff-only upstream/main; then
-            echo "result=ok" >> $GITHUB_OUTPUT
+          BEFORE=$(git rev-parse HEAD)
+          if git rebase upstream/main; then
+            AFTER=$(git rev-parse HEAD)
+            if [ "$BEFORE" = "$AFTER" ]; then
+              echo "result=noop" >> $GITHUB_OUTPUT
+            else
+              echo "result=ok" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "result=non-ff" >> $GITHUB_OUTPUT
-            exit 0
+            git rebase --abort || true
+            echo "result=conflict" >> $GITHUB_OUTPUT
           fi
 
       - name: Push to fork main
         if: steps.sync.outputs.result == 'ok'
-        run: git push origin main
+        run: git push --force-with-lease origin main
 
-      - name: Open issue on non-fast-forward divergence
-        if: steps.sync.outputs.result == 'non-ff'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const today = new Date().toISOString().slice(0, 10);
-            const title = `Sync blocked: fork diverged from upstream (${today})`;
-            const body = [
-              'The daily sync-upstream workflow could not fast-forward `main` onto `upstream/main`.',
-              '',
-              'This usually means the fork has commits not present upstream. To resolve:',
-              '1. Inspect divergence: `git fetch upstream && git log --oneline main..upstream/main; git log --oneline upstream/main..main`',
-              '2. Decide: rebase the fork onto upstream (preserves new upstream commits) or merge.',
-              '3. Push the result to `main`.',
-              '',
-              'Until resolved, Labra\'s `vendor/career-ops` submodule will not pick up new upstream changes.',
-            ].join('\n');
-
-            const { data: issues } = await github.rest.issues.listForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              state: 'open',
-              labels: 'sync-blocked',
-            });
-            if (issues.length === 0) {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                body,
-                labels: ['sync-blocked'],
-              });
-            }
+      - name: Summarize result
+        if: always()
+        run: |
+          RESULT="${{ steps.sync.outputs.result }}"
+          case "$RESULT" in
+            ok)      echo "### Sync upstream: OK" >> $GITHUB_STEP_SUMMARY ;;
+            noop)    echo "### Sync upstream: already up to date" >> $GITHUB_STEP_SUMMARY ;;
+            conflict)
+              echo "### Sync upstream: CONFLICT — manual resolution needed" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "Rebase against upstream/main hit conflicts. To resolve:" >> $GITHUB_STEP_SUMMARY
+              echo "1. \`git fetch upstream && git rebase upstream/main\`" >> $GITHUB_STEP_SUMMARY
+              echo "2. Resolve conflicts, then \`git rebase --continue\`" >> $GITHUB_STEP_SUMMARY
+              echo "3. \`git push --force-with-lease origin main\`" >> $GITHUB_STEP_SUMMARY
+              exit 1
+              ;;
+          esac
